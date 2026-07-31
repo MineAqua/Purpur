@@ -5,45 +5,63 @@ Subject: [PATCH] Configurable player death item velocity
 
 
 diff --git a/src/main/java/net/minecraft/server/level/ServerPlayer.java b/src/main/java/net/minecraft/server/level/ServerPlayer.java
-index 305b90d10a499e9731f5178433fb10207e428091..32c1e50f6619c26836dec6efb6304606d5f300d6 100644
+index 305b90d10a499e9731f5178433fb10207e428091..769dffcf4c704905f9e66edaf6976b8d33a79208 100644
 --- a/src/main/java/net/minecraft/server/level/ServerPlayer.java
 +++ b/src/main/java/net/minecraft/server/level/ServerPlayer.java
-@@ -969,7 +969,20 @@ public class ServerPlayer extends Player {
+@@ -969,7 +969,9 @@ public class ServerPlayer extends Player {
          if (!keepInventory) {
              for (ItemStack item : this.getInventory().getContents()) {
                  if (!item.isEmpty() && !EnchantmentHelper.hasVanishingCurse(item)) {
 -                    loot.add(new DefaultDrop(item, stack -> this.drop(stack, true, false, false))); // Paper - Restore vanilla drops behavior; drop function taken from Inventory#dropAll (don't fire drop event)
 +                    // Purpur start - configurable death item velocity
-+                    loot.add(new DefaultDrop(item, stack -> {
-+                        ItemEntity droppedItem = this.drop(stack, true, false, false); // Paper - Restore vanilla drops behavior; drop function taken from Inventory#dropAll (don't fire drop event)
-+                        if (droppedItem != null) {
-+                            Vec3 velocity = droppedItem.getDeltaMovement();
-+                            double horizontalScale = this.level().purpurConfig.playerDeathItemVelocityHorizontal / 0.5D;
-+                            droppedItem.setDeltaMovement(
-+                                    velocity.x * horizontalScale,
-+                                    this.level().purpurConfig.playerDeathItemVelocityVertical,
-+                                    velocity.z * horizontalScale
-+                            );
-+                        }
-+                    }));
++                    loot.add(new DefaultDrop(item, this::dropInventoryItemOnDeath));
 +                    // Purpur end - configurable death item velocity
                  }
              }
          }
+@@ -2563,6 +2565,27 @@ public class ServerPlayer extends Player {
+         this.connection.send(new ClientboundSoundPacket(BuiltInRegistries.SOUND_EVENT.wrapAsHolder(event), category, this.getX(), this.getY(), this.getZ(), volume, pitch, this.random.nextLong()));
+     }
+ 
++    // Purpur start - configurable death item velocity
++    @Nullable
++    private ItemEntity dropInventoryItemOnDeath(ItemStack stack) {
++        ItemEntity droppedItem = super.drop(stack, true, false, false); // Paper - Restore vanilla drops behavior; drop function taken from Inventory#dropAll (don't fire drop event)
++        if (droppedItem == null) {
++            return null;
++        }
++
++        Vec3 velocity = droppedItem.getDeltaMovement();
++        double horizontalScale = this.level().purpurConfig.playerDeathItemVelocityHorizontal / 0.5D;
++        droppedItem.setDeltaMovement(
++                velocity.x * horizontalScale,
++                this.level().purpurConfig.playerDeathItemVelocityVertical,
++                velocity.z * horizontalScale
++        );
++        droppedItem.setPickUpDelay(this.level().purpurConfig.playerDeathItemPickupDelayTicks);
++        this.level().addFreshEntity(droppedItem);
++        return droppedItem;
++    }
++    // Purpur end - configurable death item velocity
++
+     @Override
+     public ItemEntity drop(ItemStack stack, boolean throwRandomly, boolean retainOwnership, boolean callDropEvent) { // Paper - Restore vanilla drops behavior; override method with most params
+         ItemEntity entityitem = super.drop(stack, throwRandomly, retainOwnership, callDropEvent); // Paper - Restore vanilla drops behavior; override method with most params
 diff --git a/src/main/java/org/purpurmc/purpur/PurpurWorldConfig.java b/src/main/java/org/purpurmc/purpur/PurpurWorldConfig.java
-index 7dc82ffccc157a17335f1bc56ab81be3813294f6..0525fbbe54fe3e4b43b6bf94b0bc83f5c5d064f5 100644
+index 7dc82ffccc157a17335f1bc56ab81be3813294f6..f266e09bab254abca53feeb1c8a80ba2a526dd94 100644
 --- a/src/main/java/org/purpurmc/purpur/PurpurWorldConfig.java
 +++ b/src/main/java/org/purpurmc/purpur/PurpurWorldConfig.java
-@@ -425,6 +425,8 @@ public class PurpurWorldConfig {
+@@ -425,6 +425,9 @@ public class PurpurWorldConfig {
      public boolean idleTimeoutTargetPlayer = true;
      public String playerDeathExpDropEquation = "expLevel * 7";
      public int playerDeathExpDropMax = 100;
 +    public double playerDeathItemVelocityHorizontal = 0.5D;
 +    public double playerDeathItemVelocityVertical = 0.2D;
++    public int playerDeathItemPickupDelayTicks = 40;
      public boolean teleportIfOutsideBorder = false;
      public boolean teleportOnNetherCeilingDamage = false;
      public boolean totemOfUndyingWorksInInventory = false;
-@@ -453,6 +455,16 @@ public class PurpurWorldConfig {
+@@ -453,6 +456,21 @@ public class PurpurWorldConfig {
          idleTimeoutTargetPlayer = getBoolean("gameplay-mechanics.player.idle-timeout.mobs-target", idleTimeoutTargetPlayer);
          playerDeathExpDropEquation = getString("gameplay-mechanics.player.exp-dropped-on-death.equation", playerDeathExpDropEquation);
          playerDeathExpDropMax = getInt("gameplay-mechanics.player.exp-dropped-on-death.maximum", playerDeathExpDropMax);
@@ -56,6 +74,11 @@ index 7dc82ffccc157a17335f1bc56ab81be3813294f6..0525fbbe54fe3e4b43b6bf94b0bc83f5
 +        if (!Double.isFinite(playerDeathItemVelocityVertical) || playerDeathItemVelocityVertical < 0.0D) {
 +            log(Level.WARNING, "Invalid player death item vertical velocity for world '" + worldName + "'. Using 0.2.");
 +            playerDeathItemVelocityVertical = 0.2D;
++        }
++        playerDeathItemPickupDelayTicks = getInt("gameplay-mechanics.player.death-item-pickup-delay-ticks", playerDeathItemPickupDelayTicks);
++        if (playerDeathItemPickupDelayTicks < 0 || playerDeathItemPickupDelayTicks >= 32767) {
++            log(Level.WARNING, "Invalid player death item pickup delay for world '" + worldName + "'. Using 40 ticks.");
++            playerDeathItemPickupDelayTicks = 40;
 +        }
          teleportIfOutsideBorder = getBoolean("gameplay-mechanics.player.teleport-if-outside-border", teleportIfOutsideBorder);
          teleportOnNetherCeilingDamage = getBoolean("gameplay-mechanics.player.teleport-on-nether-ceiling-damage", teleportOnNetherCeilingDamage);
