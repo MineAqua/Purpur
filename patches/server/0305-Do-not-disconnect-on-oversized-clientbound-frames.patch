@@ -1,0 +1,104 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PurpurMC <support@purpurmc.org>
+Date: Wed, 29 Jul 2026 23:20:00 -0400
+Subject: [PATCH] Do not disconnect on oversized clientbound frames
+
+Track the packet through compression and frame preparation so packets that
+only become known to be oversized at the final framing stage can still use
+Paper's large packet fallback.
+
+If a clientbound play packet has no fallback, log and omit that single packet
+instead of disconnecting the player with "unable to fit ... into 3".
+
+diff --git a/src/main/java/net/minecraft/network/Connection.java b/src/main/java/net/minecraft/network/Connection.java
+index 9e31954212b1d6162dca2fbc91d373e908560335..cd78f53fd4feedd46b50eb8c84fc700a67a537c5 100644
+--- a/src/main/java/net/minecraft/network/Connection.java
++++ b/src/main/java/net/minecraft/network/Connection.java
+@@ -187,9 +187,15 @@ public class Connection extends SimpleChannelInboundHandler<Packet<?>> {
+                 Connection.LOGGER.debug("Skipping packet due to errors", throwable.getCause());
+                 ProtocolSwapHandler.swapProtocolIfNeeded(codecDataAttribute, packet);
+                 return;
+-            } else {
+-                throwable = throwable.getCause();
+             }
++            // Purpur start - do not disconnect on oversized clientbound frames
++            Connection.LOGGER.error(
++                "Skipping oversized clientbound packet {} ({} bytes) because it has no large-packet fallback",
++                packet.getClass().getName(), packetTooLargeException.getPacketLength()
++            );
++            ProtocolSwapHandler.swapProtocolIfNeeded(codecDataAttribute, packet);
++            return;
++            // Purpur end - do not disconnect on oversized clientbound frames
+         }
+         // Paper end - Handle large packets disconnecting client
+         if (throwable instanceof SkipPacketException) {
+diff --git a/src/main/java/net/minecraft/network/PacketEncoder.java b/src/main/java/net/minecraft/network/PacketEncoder.java
+index f396ca17e65138f5d128490b05bcd2f9c1d46ef5..5bbf9f18ae9128af1414fd9aa1887cbddd1287eb 100644
+--- a/src/main/java/net/minecraft/network/PacketEncoder.java
++++ b/src/main/java/net/minecraft/network/PacketEncoder.java
+@@ -13,6 +13,7 @@ import org.slf4j.Logger;
+ 
+ public class PacketEncoder extends MessageToByteEncoder<Packet<?>> {
+     private static final Logger LOGGER = LogUtils.getLogger();
++    static final AttributeKey<PacketContext> PACKET_CONTEXT = AttributeKey.valueOf("purpur_packet_context"); // Purpur
+     private final AttributeKey<ConnectionProtocol.CodecData<?>> codecKey;
+ 
+     public PacketEncoder(AttributeKey<ConnectionProtocol.CodecData<?>> protocolKey) {
+@@ -25,6 +26,7 @@ public class PacketEncoder extends MessageToByteEncoder<Packet<?>> {
+         if (codecData == null) {
+             throw new RuntimeException("ConnectionProtocol unknown: " + packet);
+         } else {
++            channelHandlerContext.channel().attr(PACKET_CONTEXT).set(new PacketContext(packet, this.codecKey)); // Purpur
+             int i = codecData.packetId(packet);
+             if (LOGGER.isDebugEnabled()) {
+                 LOGGER.debug(Connection.PACKET_SENT_MARKER, "OUT: [{}:{}] {}", codecData.protocol().id(), i, packet.getClass().getName());
+@@ -82,16 +84,30 @@ public class PacketEncoder extends MessageToByteEncoder<Packet<?>> {
+     public static class PacketTooLargeException extends RuntimeException {
+         private final Packet<?> packet;
+         public final AttributeKey<ConnectionProtocol.CodecData<?>> codecKey;
++        private final int packetLength; // Purpur
+ 
+         PacketTooLargeException(Packet<?> packet, AttributeKey<ConnectionProtocol.CodecData<?>> codecKey, int packetLength) {
+             super("PacketTooLarge - " + packet.getClass().getSimpleName() + " is " + packetLength + ". Max is " + MAX_PACKET_SIZE);
+             this.packet = packet;
+             this.codecKey = codecKey;
++            this.packetLength = packetLength; // Purpur
+         }
+ 
+         public Packet<?> getPacket() {
+             return this.packet;
+         }
++
++        public int getPacketLength() { // Purpur
++            return this.packetLength;
++        }
++    }
++
++    // Purpur start - retain packet identity through compression and framing
++    static record PacketContext(
++        Packet<?> packet,
++        AttributeKey<ConnectionProtocol.CodecData<?>> codecKey
++    ) {
+     }
++    // Purpur end - retain packet identity through compression and framing
+     // Paper end
+ }
+diff --git a/src/main/java/net/minecraft/network/Varint21LengthFieldPrepender.java b/src/main/java/net/minecraft/network/Varint21LengthFieldPrepender.java
+index fb08ad8fcbecf9f38c45976a8d396ecbcb6838e3..cc137d9f39cbae815baba3b9bf9140551f7487b6 100644
+--- a/src/main/java/net/minecraft/network/Varint21LengthFieldPrepender.java
++++ b/src/main/java/net/minecraft/network/Varint21LengthFieldPrepender.java
+@@ -14,6 +14,14 @@ public class Varint21LengthFieldPrepender extends MessageToByteEncoder<ByteBuf>
+         int i = byteBuf.readableBytes();
+         int j = VarInt.getByteSize(i);
+         if (j > 3) {
++            // Purpur start - preserve the packet fallback at the final framing stage
++            PacketEncoder.PacketContext packetContext = channelHandlerContext.channel().attr(PacketEncoder.PACKET_CONTEXT).get();
++            if (packetContext != null) {
++                throw new PacketEncoder.PacketTooLargeException(
++                    packetContext.packet(), packetContext.codecKey(), i
++                );
++            }
++            // Purpur end - preserve the packet fallback at the final framing stage
+             throw new EncoderException("unable to fit " + i + " into 3");
+         } else {
+             byteBuf2.ensureWritable(j + i);

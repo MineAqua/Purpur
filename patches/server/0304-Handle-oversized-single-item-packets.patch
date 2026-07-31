@@ -1,0 +1,115 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: PurpurMC <support@purpurmc.org>
+Date: Wed, 29 Jul 2026 23:00:00 -0400
+Subject: [PATCH] Handle oversized single item packets
+
+Paper splits oversized container content packets into one packet per slot.
+That fallback still disconnects the client when a single item is larger than
+the three-byte frame length limit. Send a metadata-free representation of the
+item in that case while leaving the authoritative server-side item untouched.
+
+Also handle equipment packets, since an oversized item in a hand or armor slot
+can otherwise disconnect a player while joining or tracking an entity.
+
+diff --git a/src/main/java/net/minecraft/network/protocol/game/ClientboundContainerSetSlotPacket.java b/src/main/java/net/minecraft/network/protocol/game/ClientboundContainerSetSlotPacket.java
+index 13ee7ad9c9415cd785b5487de7131c932c2198a0..23897ce97bec26ab9fef803d7572b9159f963655 100644
+--- a/src/main/java/net/minecraft/network/protocol/game/ClientboundContainerSetSlotPacket.java
++++ b/src/main/java/net/minecraft/network/protocol/game/ClientboundContainerSetSlotPacket.java
+@@ -1,5 +1,7 @@
+ package net.minecraft.network.protocol.game;
+ 
++import com.mojang.logging.LogUtils;
++import net.minecraft.network.Connection;
+ import net.minecraft.network.FriendlyByteBuf;
+ import net.minecraft.network.protocol.Packet;
+ import net.minecraft.world.item.ItemStack;
+@@ -7,6 +9,7 @@ import net.minecraft.world.item.ItemStack;
+ public class ClientboundContainerSetSlotPacket implements Packet<ClientGamePacketListener> {
+     public static final int CARRIED_ITEM = -1;
+     public static final int PLAYER_INVENTORY = -2;
++    private static final org.slf4j.Logger LOGGER = LogUtils.getLogger(); // Purpur
+     private final int containerId;
+     private final int stateId;
+     private final int slot;
+@@ -26,6 +29,26 @@ public class ClientboundContainerSetSlotPacket implements Packet<ClientGamePacke
+         this.itemStack = buf.readItem();
+     }
+ 
++    // Purpur start - handle oversized single item packets
++    @Override
++    public boolean hasLargePacketFallback() {
++        return true;
++    }
++
++    @Override
++    public boolean packetTooLarge(Connection connection) {
++        // Keep the real item on the server. Only strip its client-side
++        // representation so the replacement is guaranteed to fit in a frame.
++        ItemStack replacement = new ItemStack(this.itemStack.getItem(), this.itemStack.getCount());
++        LOGGER.warn(
++            "Not sending oversized item metadata in container {} slot {} (item {}). The server-side item was not modified.",
++            this.containerId, this.slot, this.itemStack.getItem()
++        );
++        connection.send(new ClientboundContainerSetSlotPacket(this.containerId, this.stateId, this.slot, replacement));
++        return true;
++    }
++    // Purpur end - handle oversized single item packets
++
+     @Override
+     public void write(FriendlyByteBuf buf) {
+         buf.writeByte(this.containerId);
+diff --git a/src/main/java/net/minecraft/network/protocol/game/ClientboundSetEquipmentPacket.java b/src/main/java/net/minecraft/network/protocol/game/ClientboundSetEquipmentPacket.java
+index cbd7981d32b8f8034d111eb3d9a970a394d58472..03ecaf16a4b1dfff8f0bcc327a42653b5c71b87a 100644
+--- a/src/main/java/net/minecraft/network/protocol/game/ClientboundSetEquipmentPacket.java
++++ b/src/main/java/net/minecraft/network/protocol/game/ClientboundSetEquipmentPacket.java
+@@ -1,8 +1,10 @@
+ package net.minecraft.network.protocol.game;
+ 
+ import com.google.common.collect.Lists;
++import com.mojang.logging.LogUtils;
+ import com.mojang.datafixers.util.Pair;
+ import java.util.List;
++import net.minecraft.network.Connection;
+ import net.minecraft.network.FriendlyByteBuf;
+ import net.minecraft.network.protocol.Packet;
+ import net.minecraft.world.entity.EquipmentSlot;
+@@ -10,6 +12,7 @@ import net.minecraft.world.item.ItemStack;
+ 
+ public class ClientboundSetEquipmentPacket implements Packet<ClientGamePacketListener> {
+     private static final byte CONTINUE_MASK = -128;
++    private static final org.slf4j.Logger LOGGER = LogUtils.getLogger(); // Purpur
+     private final int entity;
+     private final List<Pair<EquipmentSlot, ItemStack>> slots;
+ 
+@@ -32,6 +35,31 @@ public class ClientboundSetEquipmentPacket implements Packet<ClientGamePacketLis
+         } while ((i & -128) != 0);
+     }
+ 
++    // Purpur start - handle oversized single item packets
++    @Override
++    public boolean hasLargePacketFallback() {
++        return true;
++    }
++
++    @Override
++    public boolean packetTooLarge(Connection connection) {
++        List<Pair<EquipmentSlot, ItemStack>> replacements = Lists.newArrayListWithCapacity(this.slots.size());
++        for (Pair<EquipmentSlot, ItemStack> pair : this.slots) {
++            ItemStack itemStack = pair.getSecond();
++            replacements.add(Pair.of(
++                pair.getFirst(),
++                new ItemStack(itemStack.getItem(), itemStack.getCount())
++            ));
++        }
++        LOGGER.warn(
++            "Not sending oversized equipment item metadata for entity {}. The server-side items were not modified.",
++            this.entity
++        );
++        connection.send(new ClientboundSetEquipmentPacket(this.entity, replacements));
++        return true;
++    }
++    // Purpur end - handle oversized single item packets
++
+     @Override
+     public void write(FriendlyByteBuf buf) {
+         buf.writeVarInt(this.entity);
